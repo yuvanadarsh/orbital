@@ -1,28 +1,26 @@
 /**
  * Agents — screen 2.
- * Agent cards in collapsed/expanded states, permission banners, terminal output,
- * token usage, files touched.
+ * Agent cards in collapsed state. Clicking Expand navigates to /agents/:id
+ * for the full-page detail view.
  */
 
 import React, { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Plus,
   Pause,
   Square,
   ChevronsUpDown,
-  ChevronUp,
   AlertTriangle,
   CheckCircle2,
-  ExternalLink,
-  X,
   Bot,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type AgentStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'completed'
+export type AgentStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'completed'
 
-interface Agent {
+export interface Agent {
   id: string
   name: string
   model: string
@@ -35,12 +33,11 @@ interface Agent {
   terminalLines: string[]
   needsPermission?: boolean
   permissionCommand?: string
-  startExpanded?: boolean
 }
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
-const AGENTS: Agent[] = [
+export const AGENTS: Agent[] = [
   {
     id: '1',
     name: 'Auth System',
@@ -77,7 +74,7 @@ const AGENTS: Agent[] = [
     tokenCount: 2300,
     filesTouched: 1,
     terminalLines: [
-      "[13:45:01] Executing SQL migrations...",
+      '[13:45:01] Executing SQL migrations...',
       "[13:45:05] Table 'users' updated.",
       '[13:45:08] Task successfully completed.',
     ],
@@ -92,7 +89,6 @@ const AGENTS: Agent[] = [
     tokenCount: 34200,
     tokenLimit: 50000,
     filesTouched: 7,
-    startExpanded: true,
     terminalLines: [
       '14:28:40 $ mcp run filesystem-write --path "src/auth/middleware.ts"',
       '[INFO] Writing 142 lines of TypeScript...',
@@ -110,7 +106,7 @@ const AGENTS: Agent[] = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const STATUS_DOT: Record<AgentStatus, string> = {
+export const STATUS_DOT: Record<AgentStatus, string> = {
   running:        '#22c55e',
   idle:           '#eab308',
   awaiting_input: '#f97316',
@@ -118,7 +114,7 @@ const STATUS_DOT: Record<AgentStatus, string> = {
   completed:      '#94a3b8',
 }
 
-const STATUS_LABEL: Record<AgentStatus, string> = {
+export const STATUS_LABEL: Record<AgentStatus, string> = {
   running:        'Running',
   idle:           'Idle',
   awaiting_input: 'Awaiting Input',
@@ -126,7 +122,7 @@ const STATUS_LABEL: Record<AgentStatus, string> = {
   completed:      'Completed',
 }
 
-function fmtTokens(n: number): string {
+export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 }
 
@@ -163,23 +159,25 @@ function PermissionBanner({ command }: { command: string }): React.JSX.Element {
   )
 }
 
-// ─── Terminal block ───────────────────────────────────────────────────────────
+// ─── Terminal preview (collapsed — 5 lines max) ───────────────────────────────
 
-function Terminal({ lines, expanded }: { lines: string[]; expanded: boolean }): React.JSX.Element {
-  const visible = expanded ? lines : lines.slice(-5)
+function TerminalPreview({ lines }: { lines: string[] }): React.JSX.Element {
+  const visible = lines.slice(-5)
   return (
     <div
-      className="rounded p-3 overflow-hidden"
+      className="rounded p-3 mb-3"
       style={{
         backgroundColor: '#0a0a0d',
         border: '1px solid rgba(255,255,255,0.05)',
-        minHeight: expanded ? 160 : 88,
-        maxHeight: expanded ? 220 : 88,
+        height: 88,
+        overflow: 'hidden',
         fontFamily: 'JetBrains Mono, monospace',
       }}
     >
       {visible.map((line, i) => (
-        <p key={i} className="text-xs leading-5 whitespace-nowrap overflow-hidden text-ellipsis"
+        <p
+          key={i}
+          className="text-xs leading-5 whitespace-nowrap overflow-hidden text-ellipsis"
           style={{ color: line.startsWith('✓') ? '#22c55e' : 'rgba(255,255,255,0.45)' }}
         >
           {line}
@@ -191,13 +189,9 @@ function Terminal({ lines, expanded }: { lines: string[]; expanded: boolean }): 
 
 // ─── Collapsed agent card ─────────────────────────────────────────────────────
 
-function CollapsedCard({
-  agent,
-  onExpand,
-}: {
-  agent: Agent
-  onExpand: () => void
-}): React.JSX.Element {
+function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
+  const navigate = useNavigate()
+
   return (
     <div
       className="rounded-lg p-4"
@@ -234,17 +228,17 @@ function CollapsedCard({
         <PermissionBanner command={agent.permissionCommand} />
       )}
 
-      {/* Terminal */}
-      <Terminal lines={agent.terminalLines} expanded={false} />
+      {/* Terminal preview */}
+      <TerminalPreview lines={agent.terminalLines} />
 
       {/* Footer */}
-      <div className="flex items-center justify-between mt-3">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-4 text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>
           <span>{agent.filesTouched} files touched</span>
           <span>{fmtTokens(agent.tokenCount)} tokens</span>
         </div>
         <button
-          onClick={onExpand}
+          onClick={() => navigate(`/agents/${agent.id}`)}
           className="flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors"
           style={{
             backgroundColor: 'rgba(255,255,255,0.05)',
@@ -261,164 +255,11 @@ function CollapsedCard({
   )
 }
 
-// ─── Expanded agent card ──────────────────────────────────────────────────────
-
-function ExpandedCard({
-  agent,
-  onCollapse,
-}: {
-  agent: Agent
-  onCollapse: () => void
-}): React.JSX.Element {
-  const [input, setInput] = useState('')
-  const tokenPct = agent.tokenLimit
-    ? Math.round((agent.tokenCount / agent.tokenLimit) * 100)
-    : null
-
-  return (
-    <div
-      className="rounded-lg p-4"
-      style={{
-        backgroundColor: '#16161f',
-        border: '1px solid rgba(37,99,235,0.4)',
-        minHeight: 400,
-      }}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <span
-            className="rounded-full shrink-0"
-            style={{ width: 7, height: 7, backgroundColor: STATUS_DOT[agent.status], display: 'inline-block' }}
-          />
-          <span className="text-sm font-medium text-white">{agent.name}</span>
-          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>{agent.model}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="text-xs px-2 py-0.5 rounded"
-            style={{
-              backgroundColor: `${STATUS_DOT[agent.status]}18`,
-              color: STATUS_DOT[agent.status],
-            }}
-          >
-            {STATUS_LABEL[agent.status]}
-          </span>
-          <button
-            onClick={onCollapse}
-            className="flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors"
-            style={{
-              backgroundColor: 'rgba(255,255,255,0.05)',
-              color: 'rgba(255,255,255,0.5)',
-              border: 'none',
-              cursor: 'pointer',
-            }}
-          >
-            <ChevronUp size={12} />
-            Collapse
-          </button>
-          <button
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', padding: 2 }}
-          >
-            <X size={14} />
-          </button>
-        </div>
-      </div>
-
-      {/* Active task */}
-      {agent.task && (
-        <div className="mb-3">
-          <p className="text-xs mb-1" style={{ color: 'rgba(255,255,255,0.35)' }}>Active Task</p>
-          <p className="text-sm text-white">{agent.task}</p>
-        </div>
-      )}
-
-      {/* Progress bar */}
-      {agent.progress !== undefined && (
-        <div className="mb-4">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>Progress</span>
-            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.5)' }}>{agent.progress}%</span>
-          </div>
-          <div className="rounded-full overflow-hidden" style={{ height: 4, backgroundColor: 'rgba(255,255,255,0.07)' }}>
-            <div
-              className="h-full rounded-full"
-              style={{ width: `${agent.progress}%`, backgroundColor: '#2563eb' }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Terminal */}
-      <Terminal lines={agent.terminalLines} expanded={true} />
-
-      {/* Token usage */}
-      {tokenPct !== null && agent.tokenLimit && (
-        <div className="mt-3 mb-3">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>Token Usage</span>
-            <span className="text-xs" style={{ color: 'rgba(255,255,255,0.5)' }}>
-              {fmtTokens(agent.tokenCount)} / {fmtTokens(agent.tokenLimit)}
-            </span>
-          </div>
-          <div className="rounded-full overflow-hidden" style={{ height: 4, backgroundColor: 'rgba(255,255,255,0.07)' }}>
-            <div
-              className="h-full rounded-full"
-              style={{
-                width: `${tokenPct}%`,
-                backgroundColor: tokenPct > 80 ? '#f97316' : '#2563eb',
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Files modified */}
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
-          Files modified: <span className="text-white">{agent.filesTouched}</span>
-        </span>
-        <button
-          className="flex items-center gap-1 text-xs"
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#2563eb' }}
-        >
-          View files <ExternalLink size={11} />
-        </button>
-      </div>
-
-      {/* Task input */}
-      <div
-        className="flex items-center gap-2 rounded-md px-3"
-        style={{ backgroundColor: '#13131a', border: '1px solid rgba(255,255,255,0.07)', height: 36 }}
-      >
-        <span style={{ color: 'rgba(255,255,255,0.2)', fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>{'>'}</span>
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Send a message or task..."
-          className="flex-1 bg-transparent text-xs text-white outline-none"
-          style={{ fontFamily: 'JetBrains Mono, monospace', color: 'rgba(255,255,255,0.8)' }}
-        />
-      </div>
-    </div>
-  )
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Agents(): React.JSX.Element {
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(AGENTS.filter((a) => a.startExpanded).map((a) => a.id))
-  )
-
-  const toggle = (id: string): void => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
-  }
+  const [_filter, setFilter] = useState<string>('all')
+  void setFilter // will be wired when real agent store lands
 
   return (
     <div className="p-6 space-y-4">
@@ -467,13 +308,9 @@ export default function Agents(): React.JSX.Element {
       </div>
 
       {/* Agent cards */}
-      {AGENTS.map((agent) =>
-        expanded.has(agent.id) ? (
-          <ExpandedCard key={agent.id} agent={agent} onCollapse={() => toggle(agent.id)} />
-        ) : (
-          <CollapsedCard key={agent.id} agent={agent} onExpand={() => toggle(agent.id)} />
-        )
-      )}
+      {AGENTS.map((agent) => (
+        <AgentCard key={agent.id} agent={agent} />
+      ))}
 
       {/* System status bar */}
       <div
@@ -481,7 +318,10 @@ export default function Agents(): React.JSX.Element {
         style={{ backgroundColor: '#13131a', border: '1px solid rgba(255,255,255,0.07)' }}
       >
         <Bot size={11} style={{ color: 'rgba(255,255,255,0.2)' }} />
-        <span className="text-xs font-mono uppercase tracking-wider" style={{ color: 'rgba(255,255,255,0.2)', fontFamily: 'JetBrains Mono, monospace' }}>
+        <span
+          className="text-xs font-mono uppercase tracking-wider"
+          style={{ color: 'rgba(255,255,255,0.2)', fontFamily: 'JetBrains Mono, monospace' }}
+        >
           SYSTEM STATUS: OPERATIONAL&nbsp;&nbsp;|&nbsp;&nbsp;LATENCY: 24MS&nbsp;&nbsp;|&nbsp;&nbsp;UPTIME: 99.99%&nbsp;&nbsp;|&nbsp;&nbsp;4 AGENTS ACTIVE
         </span>
       </div>
