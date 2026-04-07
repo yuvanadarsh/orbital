@@ -1,16 +1,72 @@
-import { contextBridge } from 'electron'
+/**
+ * Preload — bridges main ↔ renderer over context-isolated IPC.
+ *
+ * Exposes window.electronAPI with typed methods the renderer can call.
+ * The existing window.electron (@electron-toolkit) is kept alongside it.
+ */
+
+import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
-// Custom APIs for renderer
-const api = {}
+// ─── Orbital API ──────────────────────────────────────────────────────────────
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
+const orbitalAPI = {
+  // ── Outbound (renderer → main) ───────────────────────────────────────────
+
+  /** Spawn a new agent process. */
+  spawnAgent: (config: unknown): Promise<void> =>
+    ipcRenderer.invoke('agent:spawn', config),
+
+  /** Kill a running agent by id. */
+  killAgent: (id: string): Promise<void> =>
+    ipcRenderer.invoke('agent:kill', id),
+
+  /** Send stdin text to a running agent. */
+  sendInput: (agentId: string, text: string): void =>
+    ipcRenderer.send('agent:input', agentId, text),
+
+  /** Respond to an agent permission request (Allow / Deny). */
+  respondToPermission: (agentId: string, allow: boolean): void =>
+    ipcRenderer.send('agent:respond', agentId, allow),
+
+  /** Ask the main process to start watching a directory for file changes. */
+  watchDirectory: (path: string): Promise<void> =>
+    ipcRenderer.invoke('files:watch', path),
+
+  /** Open the native OS directory picker and return the chosen path (or null if cancelled). */
+  browsePath: (): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:browse'),
+
+  // ── Inbound listeners (main → renderer) ─────────────────────────────────
+
+  /** Subscribe to stdout/stderr chunks from a running agent. */
+  onAgentOutput: (callback: (agentId: string, data: string) => void): void => {
+    ipcRenderer.on('agent:output', (_event, agentId: string, data: string) =>
+      callback(agentId, data)
+    )
+  },
+
+  /** Subscribe to permission-request events from a running agent. */
+  onAgentPermission: (callback: (agentId: string, command: string) => void): void => {
+    ipcRenderer.on('agent:permission', (_event, agentId: string, command: string) =>
+      callback(agentId, command)
+    )
+  },
+
+  /** Subscribe to file-change diffs emitted by the file watcher. */
+  onFileChange: (callback: (path: string, diff: string) => void): void => {
+    ipcRenderer.on('files:change', (_event, path: string, diff: string) =>
+      callback(path, diff)
+    )
+  },
+}
+
+// ─── Expose to renderer ───────────────────────────────────────────────────────
+
 if (process.contextIsolated) {
   try {
     contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
+    contextBridge.exposeInMainWorld('electronAPI', orbitalAPI)
   } catch (error) {
     console.error(error)
   }
@@ -18,5 +74,5 @@ if (process.contextIsolated) {
   // @ts-ignore (define in dts)
   window.electron = electronAPI
   // @ts-ignore (define in dts)
-  window.api = api
+  window.electronAPI = orbitalAPI
 }

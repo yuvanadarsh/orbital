@@ -1,7 +1,6 @@
 /**
  * Agents — screen 2.
- * Agent cards in collapsed state. Clicking Expand navigates to /agents/:id
- * for the full-page detail view.
+ * Agent cards sourced from agentStore. Clicking Expand navigates to /agents/:id.
  */
 
 import React, { useState } from 'react'
@@ -15,96 +14,14 @@ import {
   CheckCircle2,
   Bot,
 } from 'lucide-react'
+import { useAgentStore } from '../store/agentStore'
+import type { Agent } from '../store/agentStore'
+import NewAgentModal from '../components/NewAgentModal'
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Re-exported types and UI helpers (used by AgentDetail) ──────────────────
 
-export type AgentStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'completed'
-
-export interface Agent {
-  id: string
-  name: string
-  model: string
-  status: AgentStatus
-  task?: string
-  progress?: number
-  tokenCount: number
-  tokenLimit?: number
-  filesTouched: number
-  terminalLines: string[]
-  needsPermission?: boolean
-  permissionCommand?: string
-}
-
-// ─── Mock data ────────────────────────────────────────────────────────────────
-
-export const AGENTS: Agent[] = [
-  {
-    id: '1',
-    name: 'Auth System',
-    model: 'Claude Sonnet 4.5',
-    status: 'running',
-    tokenCount: 12400,
-    filesTouched: 3,
-    terminalLines: [
-      '[14:22:01] Checking dependencies...',
-      '[14:22:04] Scanning ./src/middleware/auth.ts',
-      '[14:22:05] Success: Found 2 vulnerable patterns.',
-      '[14:22:08] Preparing patch for JWT validation...',
-    ],
-    needsPermission: true,
-    permissionCommand: 'patch src/middleware/auth.ts',
-  },
-  {
-    id: '2',
-    name: 'Frontend UI',
-    model: 'Gemini 2.5 Pro',
-    status: 'idle',
-    tokenCount: 8100,
-    filesTouched: 12,
-    terminalLines: [
-      '[14:10:11] Component scan finished.',
-      '[14:10:12] Standing by for next task...',
-    ],
-  },
-  {
-    id: '3',
-    name: 'Database Schema',
-    model: 'Claude Sonnet 4.5',
-    status: 'completed',
-    tokenCount: 2300,
-    filesTouched: 1,
-    terminalLines: [
-      '[13:45:01] Executing SQL migrations...',
-      "[13:45:05] Table 'users' updated.",
-      '[13:45:08] Task successfully completed.',
-    ],
-  },
-  {
-    id: '4',
-    name: 'System Architect',
-    model: 'Claude Sonnet 3.5',
-    status: 'running',
-    task: 'Building auth middleware',
-    progress: 67,
-    tokenCount: 34200,
-    tokenLimit: 50000,
-    filesTouched: 7,
-    terminalLines: [
-      '14:28:40 $ mcp run filesystem-write --path "src/auth/middleware.ts"',
-      '[INFO] Writing 142 lines of TypeScript...',
-      'Applying rate-limiter logic using Redis...',
-      '✓ File written successfully.',
-      '$ npm test src/auth/middleware.test.ts',
-      'Running 12 test suites...',
-      'Test Pass: Session verification',
-      'Test Pass: Token expiration handling',
-      'Test Pass: Header injection protection',
-      'Awaiting next instruction...',
-    ],
-  },
-]
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+export type { Agent }
+export type AgentStatus = Agent['status']
 
 export const STATUS_DOT: Record<AgentStatus, string> = {
   running:        '#22c55e',
@@ -127,8 +44,9 @@ export function fmtTokens(n: number): string {
 }
 
 // ─── Permission Banner ────────────────────────────────────────────────────────
+// Rendered when main process fires agent:permission over IPC (Day 5).
 
-function PermissionBanner({ command }: { command: string }): React.JSX.Element {
+export function PermissionBanner({ command }: { command: string }): React.JSX.Element {
   return (
     <div
       className="rounded-md px-3 py-2.5 flex items-center justify-between gap-3 mb-3"
@@ -145,12 +63,14 @@ function PermissionBanner({ command }: { command: string }): React.JSX.Element {
         <button
           className="text-xs px-2.5 py-1 rounded font-medium text-white"
           style={{ backgroundColor: '#22c55e', border: 'none', cursor: 'pointer' }}
+          onClick={() => window.electronAPI.respondToPermission('', true)}
         >
           Allow
         </button>
         <button
           className="text-xs px-2.5 py-1 rounded font-medium text-white"
           style={{ backgroundColor: '#ef4444', border: 'none', cursor: 'pointer' }}
+          onClick={() => window.electronAPI.respondToPermission('', false)}
         >
           Deny
         </button>
@@ -159,7 +79,7 @@ function PermissionBanner({ command }: { command: string }): React.JSX.Element {
   )
 }
 
-// ─── Terminal preview (collapsed — 5 lines max) ───────────────────────────────
+// ─── Terminal preview ─────────────────────────────────────────────────────────
 
 function TerminalPreview({ lines }: { lines: string[] }): React.JSX.Element {
   const visible = lines.slice(-5)
@@ -174,20 +94,26 @@ function TerminalPreview({ lines }: { lines: string[] }): React.JSX.Element {
         fontFamily: 'JetBrains Mono, monospace',
       }}
     >
-      {visible.map((line, i) => (
-        <p
-          key={i}
-          className="text-xs leading-5 whitespace-nowrap overflow-hidden text-ellipsis"
-          style={{ color: line.startsWith('✓') ? '#22c55e' : 'rgba(255,255,255,0.45)' }}
-        >
-          {line}
-        </p>
-      ))}
+      {visible.length === 0 ? (
+        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.2)' }}>
+          Waiting for output...
+        </span>
+      ) : (
+        visible.map((line, i) => (
+          <p
+            key={i}
+            className="text-xs leading-5 whitespace-nowrap overflow-hidden text-ellipsis"
+            style={{ color: line.startsWith('✓') ? '#22c55e' : 'rgba(255,255,255,0.45)' }}
+          >
+            {line}
+          </p>
+        ))
+      )}
     </div>
   )
 }
 
-// ─── Collapsed agent card ─────────────────────────────────────────────────────
+// ─── Agent card ───────────────────────────────────────────────────────────────
 
 function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
   const navigate = useNavigate()
@@ -223,18 +149,13 @@ function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
         </div>
       </div>
 
-      {/* Permission banner */}
-      {agent.needsPermission && agent.permissionCommand && (
-        <PermissionBanner command={agent.permissionCommand} />
-      )}
-
-      {/* Terminal preview */}
-      <TerminalPreview lines={agent.terminalLines} />
+      {/* Terminal preview — empty until IPC output arrives */}
+      <TerminalPreview lines={[]} />
 
       {/* Footer */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4 text-xs" style={{ color: 'rgba(255,255,255,0.3)' }}>
-          <span>{agent.filesTouched} files touched</span>
+          <span>{agent.filesTouched.length} files touched</span>
           <span>{fmtTokens(agent.tokenCount)} tokens</span>
         </div>
         <button
@@ -258,11 +179,12 @@ function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Agents(): React.JSX.Element {
-  const [_filter, setFilter] = useState<string>('all')
-  void setFilter // will be wired when real agent store lands
+  const agents = useAgentStore((s) => s.agents)
+  const [showModal, setShowModal] = useState(false)
 
   return (
     <div className="p-6 space-y-4">
+      {showModal && <NewAgentModal onClose={() => setShowModal(false)} />}
 
       {/* Header + toolbar */}
       <div className="flex items-center justify-between">
@@ -298,6 +220,7 @@ export default function Agents(): React.JSX.Element {
             Stop All
           </button>
           <button
+            onClick={() => setShowModal(true)}
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md font-medium text-white"
             style={{ backgroundColor: '#2563eb', border: 'none', cursor: 'pointer' }}
           >
@@ -308,7 +231,7 @@ export default function Agents(): React.JSX.Element {
       </div>
 
       {/* Agent cards */}
-      {AGENTS.map((agent) => (
+      {agents.map((agent) => (
         <AgentCard key={agent.id} agent={agent} />
       ))}
 
@@ -322,7 +245,7 @@ export default function Agents(): React.JSX.Element {
           className="text-xs font-mono uppercase tracking-wider"
           style={{ color: 'rgba(255,255,255,0.2)', fontFamily: 'JetBrains Mono, monospace' }}
         >
-          SYSTEM STATUS: OPERATIONAL&nbsp;&nbsp;|&nbsp;&nbsp;LATENCY: 24MS&nbsp;&nbsp;|&nbsp;&nbsp;UPTIME: 99.99%&nbsp;&nbsp;|&nbsp;&nbsp;4 AGENTS ACTIVE
+          SYSTEM STATUS: OPERATIONAL&nbsp;&nbsp;|&nbsp;&nbsp;LATENCY: 24MS&nbsp;&nbsp;|&nbsp;&nbsp;UPTIME: 99.99%&nbsp;&nbsp;|&nbsp;&nbsp;{agents.length} AGENTS ACTIVE
         </span>
       </div>
 

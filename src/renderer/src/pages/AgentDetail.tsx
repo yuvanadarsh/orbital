@@ -6,8 +6,9 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, FileCode, Zap } from 'lucide-react'
-import { AGENTS, STATUS_DOT, STATUS_LABEL, fmtTokens } from './Agents'
+import { STATUS_DOT, STATUS_LABEL, fmtTokens } from './Agents'
 import type { AgentStatus } from './Agents'
+import { useAgentStore } from '../store/agentStore'
 
 // ─── Extended mock terminal history ──────────────────────────────────────────
 // Real output will come via IPC agent:output events.
@@ -178,8 +179,8 @@ export default function AgentDetail(): React.JSX.Element {
   const navigate = useNavigate()
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  const agent = AGENTS.find((a) => a.id === id)
-  const lines = id ? (EXTRA_HISTORY[id] ?? agent?.terminalLines ?? []) : []
+  const agent = useAgentStore((s) => s.agents.find((a) => a.id === id))
+  const lines = id ? (EXTRA_HISTORY[id] ?? []) : []
 
   // Auto-scroll terminal to bottom whenever lines change
   useEffect(() => {
@@ -202,7 +203,8 @@ export default function AgentDetail(): React.JSX.Element {
     )
   }
 
-  const tokenPct = agent.tokenLimit ? Math.round((agent.tokenCount / agent.tokenLimit) * 100) : null
+  // tokenLimit is not in the CLAUDE.md Agent interface; token bar shown as progress-based instead
+  const tokenPct = agent.progress > 0 ? agent.progress : null
 
   return (
     <div className="flex flex-col" style={{ height: '100%', backgroundColor: '#0d0d0f' }}>
@@ -274,12 +276,6 @@ export default function AgentDetail(): React.JSX.Element {
             <Zap size={11} style={{ color: 'rgba(255,255,255,0.25)' }} />
             <span className="text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
               {fmtTokens(agent.tokenCount)}
-              {agent.tokenLimit && (
-                <span style={{ color: 'rgba(255,255,255,0.2)' }}>
-                  {' '}
-                  / {fmtTokens(agent.tokenLimit)}
-                </span>
-              )}
             </span>
             {/* Token bar */}
             {tokenPct !== null && (
