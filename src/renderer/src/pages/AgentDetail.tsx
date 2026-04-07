@@ -6,79 +6,19 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, FileCode, Zap } from 'lucide-react'
-import { STATUS_DOT, STATUS_LABEL, fmtTokens } from './Agents'
+import { STATUS_DOT, STATUS_LABEL, fmtTokens, PermissionBanner } from './Agents'
 import type { AgentStatus } from './Agents'
 import { useAgentStore } from '../store/agentStore'
 
-// ─── Extended mock terminal history ──────────────────────────────────────────
-// Real output will come via IPC agent:output events.
-
-const EXTRA_HISTORY: Record<string, string[]> = {
-  '1': [
-    '[14:21:50] Initializing agent: Auth System',
-    '[14:21:51] Loading project context from ./src...',
-    '[14:21:55] Resolved 14 source files',
-    '[14:21:58] Running static analysis pass...',
-    '[14:22:01] Checking dependencies...',
-    '[14:22:04] Scanning ./src/middleware/auth.ts',
-    '[14:22:05] Success: Found 2 vulnerable patterns.',
-    '[14:22:08] Preparing patch for JWT validation...',
-    '[14:22:09] Awaiting permission to apply patch.'
-  ],
-  '2': [
-    '[14:09:00] Initializing agent: Frontend UI',
-    '[14:09:03] Scanning component tree...',
-    '[14:09:30] Found 47 components across 12 files',
-    '[14:09:45] Running accessibility audit...',
-    '[14:09:58] Audit complete — 3 contrast warnings',
-    '[14:10:05] Applying Button.tsx contrast fix...',
-    '[14:10:08] ✓ Button.tsx updated',
-    '[14:10:10] Applying LoginForm.tsx layout fix...',
-    '[14:10:11] Component scan finished.',
-    '[14:10:12] Standing by for next task...'
-  ],
-  '3': [
-    '[13:44:30] Initializing agent: Database Schema',
-    '[13:44:31] Connecting to local Postgres instance...',
-    '[13:44:33] ✓ Connected to orbit-dev:5432',
-    '[13:44:40] Loading schema diff from migration file...',
-    '[13:44:50] Planning migration: add columns to users table',
-    '[13:45:01] Executing SQL migrations...',
-    '[13:45:03] ALTER TABLE users ADD COLUMN last_login TIMESTAMP',
-    '[13:45:04] ALTER TABLE users ADD COLUMN login_count INTEGER DEFAULT 0',
-    "[13:45:05] Table 'users' updated.",
-    '[13:45:06] Running post-migration validation...',
-    '[13:45:07] ✓ Row count intact: 2,847 records',
-    '[13:45:08] Task successfully completed.'
-  ],
-  '4': [
-    '[14:27:00] Initializing agent: System Architect',
-    '[14:27:01] Loading task: Build auth middleware',
-    '[14:27:05] Analyzing existing auth patterns in ./src/auth...',
-    '[14:27:15] Planning middleware architecture...',
-    '[14:27:30] Scaffolding src/auth/middleware.ts',
-    '[14:28:00] $ mcp run filesystem-read --path "src/auth/config.ts"',
-    '[14:28:02] [INFO] Read 38 lines',
-    '[14:28:10] Generating TypeScript from architecture plan...',
-    '[14:28:40] $ mcp run filesystem-write --path "src/auth/middleware.ts"',
-    '[14:28:41] [INFO] Writing 142 lines of TypeScript...',
-    '[14:28:43] Applying rate-limiter logic using Redis...',
-    '[14:28:45] ✓ File written successfully.',
-    '[14:28:50] $ npm test src/auth/middleware.test.ts',
-    '[14:28:52] Running 12 test suites...',
-    '[14:28:55] Test Pass: Session verification',
-    '[14:28:56] Test Pass: Token expiration handling',
-    '[14:28:57] Test Pass: Header injection protection',
-    '[14:29:00] Awaiting next instruction...'
-  ]
-}
+// Stable empty-array constant — same reason as in Agents.tsx.
+const EMPTY_LINES: string[] = []
 
 // ─── Task input ───────────────────────────────────────────────────────────────
 
 const LINE_HEIGHT = 20
 const MAX_HEIGHT = LINE_HEIGHT * 5
 
-function TaskInput(): React.JSX.Element {
+function TaskInput({ agentId }: { agentId: string }): React.JSX.Element {
   const [value, setValue] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -93,7 +33,7 @@ function TaskInput(): React.JSX.Element {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       if (value.trim()) {
-        // TODO: wire to IPC agent:input
+        window.electronAPI.sendInput(agentId, value.trim())
         setValue('')
       }
     }
@@ -180,12 +120,35 @@ export default function AgentDetail(): React.JSX.Element {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const agent = useAgentStore((s) => s.agents.find((a) => a.id === id))
-  const lines = id ? (EXTRA_HISTORY[id] ?? []) : []
+  // Stable empty-array constants for the Zustand selector — avoids useSyncExternalStore
+  // detecting an "unstable snapshot" (new [] reference on every call).
+  const lines = useAgentStore((s) => s.outputLines[id ?? ''] ?? EMPTY_LINES)
+
+  const [permissionMsg, setPermissionMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!id) return
+    const handlePermission = (agentId: string, message: string): void => {
+      if (agentId !== id) return
+      setPermissionMsg(message)
+    }
+    window.electronAPI.onAgentPermission(handlePermission)
+  }, [id])
 
   // Auto-scroll terminal to bottom whenever lines change
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines])
+
+  const handleAllow = (): void => {
+    if (id) window.electronAPI.respondToPermission(id, true)
+    setPermissionMsg(null)
+  }
+
+  const handleDeny = (): void => {
+    if (id) window.electronAPI.respondToPermission(id, false)
+    setPermissionMsg(null)
+  }
 
   if (!agent) {
     return (
@@ -203,7 +166,6 @@ export default function AgentDetail(): React.JSX.Element {
     )
   }
 
-  // tokenLimit is not in the CLAUDE.md Agent interface; token bar shown as progress-based instead
   const tokenPct = agent.progress > 0 ? agent.progress : null
 
   return (
@@ -298,7 +260,7 @@ export default function AgentDetail(): React.JSX.Element {
           <div className="flex items-center gap-1.5">
             <FileCode size={11} style={{ color: 'rgba(255,255,255,0.25)' }} />
             <span className="text-xs" style={{ color: 'rgba(255,255,255,0.4)' }}>
-              {agent.filesTouched} files
+              {agent.filesTouched.length} files
             </span>
           </div>
         </div>
@@ -370,7 +332,15 @@ export default function AgentDetail(): React.JSX.Element {
           borderTop: '1px solid rgba(255,255,255,0.07)'
         }}
       >
-        <TaskInput />
+        {/* Permission banner — shown when agent pauses for approval */}
+        {permissionMsg && (
+          <PermissionBanner
+            command={permissionMsg}
+            onAllow={handleAllow}
+            onDeny={handleDeny}
+          />
+        )}
+        <TaskInput agentId={id ?? ''} />
       </div>
     </div>
   )

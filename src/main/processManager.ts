@@ -59,7 +59,13 @@ function getWebContents(): Electron.WebContents | undefined {
 
 /** Push a line of output to the renderer for a given agent. */
 function pushOutput(agentId: string, line: string): void {
-  getWebContents()?.send('agent:output', agentId, line)
+  const wc = getWebContents()
+  if (!wc) {
+    console.warn('[processManager] pushOutput: no webContents — window not ready')
+    return
+  }
+  console.log('[IPC] sending agent:output', agentId, line.slice(0, 80))
+  wc.send('agent:output', agentId, line)
 }
 
 /**
@@ -69,12 +75,12 @@ function pushOutput(agentId: string, line: string): void {
 function resolveCommand(model: string, task: string): { cmd: string; args: string[] } {
   const m = model.toLowerCase()
   if (m.includes('claude')) {
-    return { cmd: resolvedClaudePath, args: ['-p', task] }
+    return { cmd: resolvedClaudePath, args: ['-p', task, '--dangerously-skip-permissions'] }
   }
   if (m.includes('gemini')) return { cmd: 'gemini', args: [task] }
   if (m.includes('codex') || m === 'o3' || m === 'o4-mini') return { cmd: 'codex', args: [task] }
   // Fallback to claude
-  return { cmd: resolvedClaudePath, args: ['-p', task] }
+  return { cmd: resolvedClaudePath, args: ['-p', task, '--dangerously-skip-permissions'] }
 }
 
 /**
@@ -110,10 +116,13 @@ export function spawnAgent(config: SpawnConfig): SpawnResult {
 
   let child: ChildProcess
   try {
+    // shell: false — args are passed directly to execvp, no shell splitting.
+    // With shell:true, a task like "create a file called test.txt" becomes
+    // four separate shell tokens; the full string must arrive as one argument.
     child = spawn(cmd, args, {
       cwd: workingDirectory,
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
+      shell: false,
       env: augmentedEnv,
     })
   } catch (err) {
@@ -129,6 +138,7 @@ export function spawnAgent(config: SpawnConfig): SpawnResult {
   // ── stdout ───────────────────────────────────────────────────────────────
   let stdoutBuf = ''
   child.stdout?.on('data', (chunk: Buffer) => {
+    console.log(`[processManager] stdout chunk agent=${id} bytes=${chunk.length}`)
     stdoutBuf = flushLines(id, stdoutBuf, chunk)
   })
 

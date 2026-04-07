@@ -27,6 +27,9 @@ interface AgentStore {
   updateAgent: (id: string, patch: Partial<Agent>) => void
   setAgentStatus: (id: string, status: Agent['status']) => void
   appendFileTouched: (id: string, file: string) => void
+  // Terminal output keyed by agent id — populated by the global IPC subscription in main.tsx
+  outputLines: Record<string, string[]>
+  appendOutput: (id: string, line: string) => void
 }
 
 // ─── Initial mock data ────────────────────────────────────────────────────────
@@ -126,5 +129,15 @@ export const useAgentStore = create<AgentStore>((set) => ({
       agents: s.agents.map((a) =>
         a.id === id ? { ...a, filesTouched: [...a.filesTouched, file] } : a
       ),
+    })),
+
+  outputLines: {},
+
+  appendOutput: (id, line) =>
+    set((s) => ({
+      outputLines: {
+        ...s.outputLines,
+        [id]: [...(s.outputLines[id] ?? []), line],
+      },
     })),
 }))

@@ -66,9 +66,9 @@ app.whenReady().then(() => {
     sendInput(agentId, text)
   })
 
-  // Claude Code reads 'allow' or 'deny' (+ newline) on stdin for permission prompts.
+  // Claude Code reads 'y' (allow) or '2' (deny) on stdin for permission prompts.
   ipcMain.on('agent:respond', (_event, agentId: string, allow: boolean) => {
-    sendInput(agentId, allow ? 'allow' : 'deny')
+    sendInput(agentId, allow ? 'y' : '2')
   })
 
   // ── File watching ─────────────────────────────────────────────────────────

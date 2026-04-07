@@ -8,6 +8,19 @@ import './assets/main.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import { useAgentStore } from './store/agentStore'
+
+// ─── Global IPC subscription (set up once, never duplicated) ─────────────────
+// Route every agent:output event into the store so AgentCard and AgentDetail
+// both see real-time output regardless of which page is currently mounted.
+if (window.electronAPI) {
+  window.electronAPI.onAgentOutput((agentId: string, line: string) => {
+    console.log('[RENDERER] agent:output received', agentId, line.slice(0, 80))
+    useAgentStore.getState().appendOutput(agentId, line)
+  })
+} else {
+  console.error('[RENDERER] window.electronAPI is not available — preload may have failed')
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

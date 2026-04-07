@@ -44,9 +44,17 @@ export function fmtTokens(n: number): string {
 }
 
 // ─── Permission Banner ────────────────────────────────────────────────────────
-// Rendered when main process fires agent:permission over IPC (Day 5).
+// Rendered when main process fires agent:permission over IPC.
 
-export function PermissionBanner({ command }: { command: string }): React.JSX.Element {
+export function PermissionBanner({
+  command,
+  onAllow,
+  onDeny,
+}: {
+  command: string
+  onAllow: () => void
+  onDeny: () => void
+}): React.JSX.Element {
   return (
     <div
       className="rounded-md px-3 py-2.5 flex items-center justify-between gap-3 mb-3"
@@ -55,7 +63,7 @@ export function PermissionBanner({ command }: { command: string }): React.JSX.El
       <div className="flex items-center gap-2 min-w-0">
         <AlertTriangle size={13} style={{ color: '#f97316', flexShrink: 0 }} />
         <span className="text-xs text-white/80 truncate">
-          Agent requesting permission to run:{' '}
+          Agent requesting permission:{' '}
           <span className="font-mono" style={{ color: '#f97316' }}>{command}</span>
         </span>
       </div>
@@ -63,14 +71,14 @@ export function PermissionBanner({ command }: { command: string }): React.JSX.El
         <button
           className="text-xs px-2.5 py-1 rounded font-medium text-white"
           style={{ backgroundColor: '#22c55e', border: 'none', cursor: 'pointer' }}
-          onClick={() => window.electronAPI.respondToPermission('', true)}
+          onClick={onAllow}
         >
           Allow
         </button>
         <button
           className="text-xs px-2.5 py-1 rounded font-medium text-white"
           style={{ backgroundColor: '#ef4444', border: 'none', cursor: 'pointer' }}
-          onClick={() => window.electronAPI.respondToPermission('', false)}
+          onClick={onDeny}
         >
           Deny
         </button>
@@ -78,6 +86,12 @@ export function PermissionBanner({ command }: { command: string }): React.JSX.El
     </div>
   )
 }
+
+// Stable empty array — returned by the Zustand selector when an agent has no
+// output yet.  Using a module-level constant ensures the same reference is
+// returned every call, satisfying React useSyncExternalStore's requirement
+// that getSnapshot() never returns a new object for the same underlying state.
+const EMPTY_LINES: string[] = []
 
 // ─── Terminal preview ─────────────────────────────────────────────────────────
 
@@ -117,6 +131,7 @@ function TerminalPreview({ lines }: { lines: string[] }): React.JSX.Element {
 
 function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
   const navigate = useNavigate()
+  const lines = useAgentStore((s) => s.outputLines[agent.id] ?? EMPTY_LINES)
 
   return (
     <div
@@ -149,8 +164,8 @@ function AgentCard({ agent }: { agent: Agent }): React.JSX.Element {
         </div>
       </div>
 
-      {/* Terminal preview — empty until IPC output arrives */}
-      <TerminalPreview lines={[]} />
+      {/* Terminal preview — live output from IPC */}
+      <TerminalPreview lines={lines} />
 
       {/* Footer */}
       <div className="flex items-center justify-between">
