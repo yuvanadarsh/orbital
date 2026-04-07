@@ -4,10 +4,12 @@
  * Structure (flex-row, full viewport):
  *   ┌──────────────────────────────────────────────────┐
  *   │ TopBar (44px, full width, above sidebar+content) │
- *   ├────────────┬─────────────────────────────────────┤
- *   │  Sidebar   │  <Outlet /> — page content          │
- *   │  52/220px  │  fills remaining space              │
- *   └────────────┴─────────────────────────────────────┘
+ *   ├────────────────┬─────────────────────────────────┤
+ *   │  Sidebar       │  <Outlet /> — page content      │
+ *   │  52px/220px    │  fills remaining space          │
+ *   └────────────────┴─────────────────────────────────┘
+ *
+ * expanded is owned here so the sidebar state persists across page navigation.
  */
 
 import { useState } from 'react'
@@ -16,8 +18,8 @@ import TopBar from './TopBar'
 import Sidebar from './Sidebar'
 
 export default function Layout(): React.JSX.Element {
-  // Track the active page label so TopBar can display it
   const [pageTitle, setPageTitle] = useState('Dashboard')
+  const [expanded, setExpanded]   = useState(false)
 
   return (
     <div
@@ -29,7 +31,11 @@ export default function Layout(): React.JSX.Element {
 
       {/* Body: sidebar + page content side by side */}
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar onNavigate={setPageTitle} />
+        <Sidebar
+          expanded={expanded}
+          onToggle={() => setExpanded((v) => !v)}
+          onNavigate={setPageTitle}
+        />
 
         {/* Main content area — each page component renders here via <Outlet /> */}
         <main
