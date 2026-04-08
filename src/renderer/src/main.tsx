@@ -18,6 +18,11 @@ if (window.electronAPI) {
     console.log('[RENDERER] agent:output received', agentId, line.slice(0, 80))
     useAgentStore.getState().appendOutput(agentId, line)
   })
+
+  window.electronAPI.onAgentSessionId((agentId: string, sessionId: string) => {
+    console.log('[RENDERER] agent:sessionId received', agentId, sessionId)
+    useAgentStore.getState().setSessionId(agentId, sessionId)
+  })
 } else {
   console.error('[RENDERER] window.electronAPI is not available — preload may have failed')
 }

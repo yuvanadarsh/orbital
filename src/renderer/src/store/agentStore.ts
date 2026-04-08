@@ -18,6 +18,7 @@ export interface Agent {
   filesTouched: string[]
   workingDirectory: string
   pid?: number
+  sessionId?: string // captured from Claude Code stdout; used for --resume on follow-ups
 }
 
 interface AgentStore {
@@ -27,6 +28,7 @@ interface AgentStore {
   updateAgent: (id: string, patch: Partial<Agent>) => void
   setAgentStatus: (id: string, status: Agent['status']) => void
   appendFileTouched: (id: string, file: string) => void
+  setSessionId: (id: string, sessionId: string) => void
   // Terminal output keyed by agent id — populated by the global IPC subscription in main.tsx
   outputLines: Record<string, string[]>
   appendOutput: (id: string, line: string) => void
@@ -129,6 +131,11 @@ export const useAgentStore = create<AgentStore>((set) => ({
       agents: s.agents.map((a) =>
         a.id === id ? { ...a, filesTouched: [...a.filesTouched, file] } : a
       ),
+    })),
+
+  setSessionId: (id, sessionId) =>
+    set((s) => ({
+      agents: s.agents.map((a) => (a.id === id ? { ...a, sessionId } : a)),
     })),
 
   outputLines: {},

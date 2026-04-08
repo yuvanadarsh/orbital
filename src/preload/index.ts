@@ -21,7 +21,7 @@ const orbitalAPI = {
   killAgent: (id: string): Promise<void> =>
     ipcRenderer.invoke('agent:kill', id),
 
-  /** Send stdin text to a running agent. */
+  /** Send a follow-up task to an agent; main process re-spawns with --resume if a session ID exists. */
   sendInput: (agentId: string, text: string): void =>
     ipcRenderer.send('agent:input', agentId, text),
 
@@ -57,6 +57,13 @@ const orbitalAPI = {
   onFileChange: (callback: (path: string, diff: string) => void): void => {
     ipcRenderer.on('files:change', (_event, path: string, diff: string) =>
       callback(path, diff)
+    )
+  },
+
+  /** Subscribe to session ID events — fired when Claude Code outputs its session ID. */
+  onAgentSessionId: (callback: (agentId: string, sessionId: string) => void): void => {
+    ipcRenderer.on('agent:sessionId', (_event, agentId: string, sessionId: string) =>
+      callback(agentId, sessionId)
     )
   },
 }

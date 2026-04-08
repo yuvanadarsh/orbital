@@ -6,6 +6,7 @@ import {
   spawnAgent,
   killAgent,
   sendInput,
+  respawnWithTask,
   killAllAgents,
 } from './processManager'
 import type { SpawnConfig } from './processManager'
@@ -62,8 +63,12 @@ app.whenReady().then(() => {
     killAgent(id)
   })
 
+  // Claude Code's -p flag runs one task and exits — it can't receive follow-up
+  // stdin input. Each new message spawns a fresh -p invocation against the same
+  // working directory, with output streaming into the same terminal.
+  // Session continuity is handled automatically via the captured session ID.
   ipcMain.on('agent:input', (_event, agentId: string, text: string) => {
-    sendInput(agentId, text)
+    respawnWithTask(agentId, text)
   })
 
   // Claude Code reads 'y' (allow) or '2' (deny) on stdin for permission prompts.

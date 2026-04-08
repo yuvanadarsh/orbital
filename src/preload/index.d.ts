@@ -18,6 +18,7 @@ interface OrbitalAPI {
   onAgentOutput: (callback: (agentId: string, data: string) => void) => void
   onAgentPermission: (callback: (agentId: string, command: string) => void) => void
   onFileChange: (callback: (path: string, diff: string) => void) => void
+  onAgentSessionId: (callback: (agentId: string, sessionId: string) => void) => void
 }
 
 declare global {

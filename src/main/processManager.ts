@@ -29,6 +29,12 @@ export interface SpawnResult {
 
 const processes = new Map<string, ChildProcess>()
 
+/** Last-known config per agent — used to re-spawn with a new task. */
+const agentConfigs = new Map<string, SpawnConfig>()
+
+/** Session ID captured from Claude Code stdout — used for --resume on follow-ups. */
+const agentSessionIds = new Map<string, string>()
+
 // ─── PATH augmentation ────────────────────────────────────────────────────────
 
 const LOCAL_BIN = '/Users/yuvanadarshjagannnathan/.local/bin'
@@ -68,21 +74,58 @@ function pushOutput(agentId: string, line: string): void {
   wc.send('agent:output', agentId, line)
 }
 
+/** Fire agent:permission to the renderer when a permission prompt is detected. */
+function pushPermission(agentId: string, message: string): void {
+  const wc = getWebContents()
+  if (!wc) return
+  console.log('[IPC] sending agent:permission', agentId, message.slice(0, 80))
+  wc.send('agent:permission', agentId, message)
+}
+
+/** Fire agent:sessionId to the renderer so it can persist the session ID. */
+function pushSessionId(agentId: string, sessionId: string): void {
+  const wc = getWebContents()
+  if (!wc) return
+  console.log('[IPC] sending agent:sessionId', agentId, sessionId)
+  wc.send('agent:sessionId', agentId, sessionId)
+}
+
+/**
+ * Patterns that indicate Claude Code is pausing for user approval.
+ * Tested against the raw stdout line (case-insensitive).
+ */
+const PERMISSION_RE = /do you want to|allow this|shall i|\(y\/n\)|yes\/no/i
+
+/**
+ * Extract a Claude Code session ID from a stdout line.
+ * Matches "session_id: <uuid>", "Session: <uuid>", JSON "session_id":"<uuid>",
+ * or a line that is purely a UUID.
+ */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+const SESSION_CONTEXT_RE = /session[_\-]?id|session/i
+
+function extractSessionId(line: string): string | null {
+  const uuid = line.match(UUID_RE)?.[0]
+  if (!uuid) return null
+  // Accept if there's a "session" keyword on the same line, or the line is purely the UUID.
+  if (SESSION_CONTEXT_RE.test(line) || line.trim() === uuid) return uuid
+  return null
+}
+
 /**
  * Resolve the CLI binary and arguments for a given model name.
  * Claude uses the dynamically-resolved absolute path.
  */
 function resolveCommand(
   model: string,
-  task: string
+  task: string,
+  sessionId?: string
 ): { cmd: string; args: string[]; stdinMode: 'pipe' | 'ignore' } {
   const m = model.toLowerCase()
   if (m.includes('claude')) {
-    return {
-      cmd: resolvedClaudePath,
-      args: ['-p', task, '--dangerously-skip-permissions'],
-      stdinMode: 'pipe',
-    }
+    const args = ['-p', task, '--dangerously-skip-permissions']
+    if (sessionId) args.push('--resume', sessionId)
+    return { cmd: resolvedClaudePath, args, stdinMode: 'pipe' }
   }
   if (m.includes('gemini')) {
     return { cmd: 'gemini', args: ['-m', model, '--prompt', task, '--yolo'], stdinMode: 'ignore' }
@@ -101,18 +144,23 @@ function resolveCommand(
 /**
  * Relay buffered chunks as individual lines.
  * Returns any partial (unterminated) line remaining in the buffer.
+ * onLine, if provided, is called for each complete line (before prefix is applied).
  */
 function flushLines(
   agentId: string,
   buf: string,
   chunk: Buffer,
-  prefix = ''
+  prefix = '',
+  onLine?: (line: string) => void
 ): string {
   const combined = buf + chunk.toString()
   const lines = combined.split('\n')
   const remaining = lines.pop() ?? '' // last element is unterminated partial line
   for (const line of lines) {
-    if (line.length > 0) pushOutput(agentId, prefix + line)
+    if (line.length > 0) {
+      pushOutput(agentId, prefix + line)
+      onLine?.(line)
+    }
   }
   return remaining
 }
@@ -120,13 +168,16 @@ function flushLines(
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /** Spawn a new agent process. Returns success + pid on success. */
-export function spawnAgent(config: SpawnConfig): SpawnResult {
+export function spawnAgent(config: SpawnConfig, sessionId?: string): SpawnResult {
   const { id, model, workingDirectory, task } = config
-  const { cmd, args, stdinMode } = resolveCommand(model, task)
+  const { cmd, args, stdinMode } = resolveCommand(model, task, sessionId)
 
   const augmentedEnv = { ...process.env, PATH: AUGMENTED_PATH }
 
-  console.log(`[processManager] spawning: ${cmd} ${args.join(' ')}`)
+  // DEBUG: print the full resolved command so we can verify --resume <sessionId> appears
+  console.log(`[DEBUG spawn] cmd: ${cmd}`)
+  console.log(`[DEBUG spawn] args: ${JSON.stringify(args)}`)
+  console.log(`[DEBUG spawn] sessionId passed in: ${sessionId ?? '(none)'}`)
   console.log(`[processManager] cwd: ${workingDirectory}`)
 
   let child: ChildProcess
@@ -149,12 +200,26 @@ export function spawnAgent(config: SpawnConfig): SpawnResult {
 
   console.log(`[processManager] spawned pid=${child.pid} for agent=${id}`)
   processes.set(id, child)
+  agentConfigs.set(id, config)
 
   // ── stdout ───────────────────────────────────────────────────────────────
   let stdoutBuf = ''
+
+  const processLine = (line: string): void => {
+    console.log('[RAW stdout]', JSON.stringify(line))
+    if (PERMISSION_RE.test(line)) pushPermission(id, line)
+    if (!agentSessionIds.has(id)) {
+      const sid = extractSessionId(line)
+      if (sid) {
+        console.log('[SESSION CAPTURED]', sid)
+        agentSessionIds.set(id, sid)
+        pushSessionId(id, sid)
+      }
+    }
+  }
+
   child.stdout?.on('data', (chunk: Buffer) => {
-    console.log(`[processManager] stdout chunk agent=${id} bytes=${chunk.length}`)
-    stdoutBuf = flushLines(id, stdoutBuf, chunk)
+    stdoutBuf = flushLines(id, stdoutBuf, chunk, '', processLine)
   })
 
   // ── stderr ───────────────────────────────────────────────────────────────
@@ -175,16 +240,22 @@ export function spawnAgent(config: SpawnConfig): SpawnResult {
     }
     console.error(`[processManager] process error for agent=${id}:`, err)
     processes.delete(id)
+    // Keep agentConfigs so follow-up tasks can still be spawned.
     pushOutput(id, '[ORBITAL] Agent exited with error.')
   })
 
   // ── process exit ──────────────────────────────────────────────────────────
   child.on('close', (code: number | null) => {
-    if (stdoutBuf.length > 0) pushOutput(id, stdoutBuf)
+    // Flush any unterminated final line — it won't have been processed by flushLines.
+    if (stdoutBuf.length > 0) {
+      pushOutput(id, stdoutBuf)
+      processLine(stdoutBuf)
+    }
     if (stderrBuf.length > 0) pushOutput(id, `[ERR] ${stderrBuf}`)
 
     console.log(`[processManager] agent=${id} exited with code=${code}`)
     processes.delete(id)
+    // Keep agentConfigs so follow-up tasks can still be spawned.
     pushOutput(id, `[ORBITAL] Agent exited (code ${code ?? 'unknown'}).`)
   })
 
@@ -198,14 +269,46 @@ export function killAgent(id: string): void {
     child.kill('SIGTERM')
     processes.delete(id)
   }
+  agentConfigs.delete(id)
+  agentSessionIds.delete(id)
 }
 
-/** Write text to a running agent's stdin (e.g. task input or permission response). */
+/** Write text to a running agent's stdin (e.g. permission response). */
 export function sendInput(id: string, text: string): void {
   const child = processes.get(id)
   if (child?.stdin?.writable) {
     child.stdin.write(text + '\n')
   }
+}
+
+/**
+ * Spawn a fresh -p invocation for a follow-up task message.
+ * The previous process (if still running) is killed first.
+ * If a session ID was captured from the previous run, --resume <sessionId> is
+ * appended so Claude Code continues the same session context.
+ * Output streams into the same agent terminal (cumulative).
+ */
+export function respawnWithTask(agentId: string, newTask: string): SpawnResult {
+  const prev = processes.get(agentId)
+  if (prev) {
+    prev.kill('SIGTERM')
+    processes.delete(agentId)
+  }
+
+  const prevConfig = agentConfigs.get(agentId)
+  if (!prevConfig) {
+    const msg = `[ERR] No config found for agent ${agentId} — cannot respawn.`
+    pushOutput(agentId, msg)
+    return { success: false, error: msg }
+  }
+
+  // Use the captured session ID for --resume, if available.
+  const sessionId = agentSessionIds.get(agentId)
+  // Reset so we capture the new session ID from this invocation's output.
+  agentSessionIds.delete(agentId)
+
+  pushOutput(agentId, `[ORBITAL] New task: ${newTask}`)
+  return spawnAgent({ ...prevConfig, task: newTask }, sessionId)
 }
 
 /** Kill every running agent process. Called on app quit. */
@@ -214,4 +317,6 @@ export function killAllAgents(): void {
     child.kill('SIGTERM')
   }
   processes.clear()
+  agentConfigs.clear()
+  agentSessionIds.clear()
 }
