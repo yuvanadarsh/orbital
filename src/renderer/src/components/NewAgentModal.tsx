@@ -13,8 +13,7 @@ import type { Agent } from '../store/agentStore'
 const MODELS: { label: string; value: string; cli: string }[] = [
   { label: 'Claude Sonnet (claude code)', value: 'claude-sonnet',  cli: 'claude' },
   { label: 'Claude Opus (claude code)',   value: 'claude-opus',    cli: 'claude' },
-  { label: 'Gemini 2.5 Pro (gemini cli)',   value: 'gemini-2.5-pro',   cli: 'gemini' },
-  { label: 'Gemini 2.0 Flash (gemini cli)', value: 'gemini-2.0-flash', cli: 'gemini' },
+  { label: 'Gemini 2.5 Flash (gemini cli)', value: 'gemini-2.5-flash', cli: 'gemini' },
   { label: 'o3 (codex cli)',              value: 'o3',             cli: 'codex'  },
   { label: 'o4-mini (codex cli)',         value: 'o4-mini',        cli: 'codex'  },
 ]

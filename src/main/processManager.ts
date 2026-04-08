@@ -85,7 +85,7 @@ function resolveCommand(
     }
   }
   if (m.includes('gemini')) {
-    return { cmd: 'gemini', args: ['--prompt', task, '--yolo'], stdinMode: 'ignore' }
+    return { cmd: 'gemini', args: ['-m', model, '--prompt', task, '--yolo'], stdinMode: 'ignore' }
   }
   if (m.includes('codex') || m === 'o3' || m === 'o4-mini') {
     return { cmd: 'codex', args: [task], stdinMode: 'pipe' }
