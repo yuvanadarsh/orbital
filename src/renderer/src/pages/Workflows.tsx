@@ -1,253 +1,183 @@
 /**
  * Workflows — screen 3.
- * Read-only live node graph showing agents, files they touch, and connections.
- * Rendered as a static SVG diagram (Mermaid.js placeholder layout).
+ * Live read-only Mermaid.js graph: one node per agent, one node per file touched,
+ * edges connecting agents to the files they modified.
+ * Re-renders automatically whenever agentStore changes.
  */
 
-import React from 'react'
-import { Download, Pause, Clock, GitBranch } from 'lucide-react'
+import React, { useEffect, useRef } from 'react'
+import mermaid from 'mermaid'
+import { GitBranch, Clock } from 'lucide-react'
+import { useAgentStore } from '../store/agentStore'
+import type { Agent } from '../store/agentStore'
 
-// ─── Graph data ───────────────────────────────────────────────────────────────
+// ─── Status colours (matches CLAUDE.md design system) ────────────────────────
 
-interface AgentNode {
-  id: string
-  name: string
-  model: string
-  status: 'live' | 'completed'
-  x: number
-  y: number
+const STATUS_COLOR: Record<Agent['status'], string> = {
+  running:        '#22c55e',
+  idle:           '#eab308',
+  awaiting_input: '#f97316',
+  error:          '#ef4444',
+  completed:      '#94a3b8',
 }
 
-interface FileNode {
-  id: string
-  name: string
-  fileStatus: 'modified' | 'created' | 'unchanged'
-  x: number
-  y: number
+// Mermaid style string per status
+const STATUS_STYLE: Record<Agent['status'], string> = {
+  running:        'fill:#16161f,stroke:#22c55e,stroke-width:2px,color:#fff',
+  idle:           'fill:#16161f,stroke:#eab308,stroke-width:2px,color:#fff',
+  awaiting_input: 'fill:#16161f,stroke:#f97316,stroke-width:2px,color:#fff',
+  error:          'fill:#16161f,stroke:#ef4444,stroke-width:2px,color:#fff',
+  completed:      'fill:#16161f,stroke:#94a3b8,stroke-width:1.5px,color:rgba(255,255,255,0.5)',
 }
 
-interface Edge {
-  from: string // agent id
-  to: string   // file id
+// ─── Diagram builder ──────────────────────────────────────────────────────────
+
+function buildDefinition(agents: Agent[]): string {
+  const lines: string[] = ['graph LR']
+  const fileNodeIds = new Map<string, string>() // filepath → safe node id
+  const agentStyles: string[] = []
+
+  agents.forEach((agent, ai) => {
+    const agentNodeId = `agent_${ai}`
+    const label = `${agent.name}\\n${agent.status}`
+    lines.push(`  ${agentNodeId}["${label}"]`)
+    agentStyles.push(`style ${agentNodeId} ${STATUS_STYLE[agent.status]}`)
+
+    agent.filesTouched.forEach((filepath, fi) => {
+      const filename = filepath.split('/').pop() ?? filepath
+      // Deduplicate file nodes across agents by full path
+      let fileNodeId = fileNodeIds.get(filepath)
+      if (!fileNodeId) {
+        fileNodeId = `file_${ai}_${fi}`
+        fileNodeIds.set(filepath, fileNodeId)
+        lines.push(`  ${fileNodeId}(["${filename}"])`)
+        lines.push(`  style ${fileNodeId} fill:#13131a,stroke:#2563eb,stroke-width:1.2px,color:rgba(255,255,255,0.7)`)
+      }
+      lines.push(`  ${agentNodeId} --> ${fileNodeId}`)
+    })
+  })
+
+  // Append agent styles after all nodes are declared
+  agentStyles.forEach((s) => lines.push(`  ${s}`))
+
+  return lines.join('\n')
 }
 
-const AGENT_W = 184
-const AGENT_H = 58
-const FILE_W  = 148
-const FILE_H  = 38
+// ─── Mermaid canvas ───────────────────────────────────────────────────────────
 
-const AGENTS: AgentNode[] = [
-  { id: 'auth',     name: 'Auth System',      model: 'Claude Sonnet 4.5', status: 'live',      x: 60,  y: 50  },
-  { id: 'frontend', name: 'Frontend UI',      model: 'Gemini 2.5 Pro',   status: 'live',      x: 60,  y: 200 },
-  { id: 'db',       name: 'Database Schema',  model: 'Claude Haiku',      status: 'completed', x: 60,  y: 350 },
-]
+let mermaidInitialised = false
 
-const FILES: FileNode[] = [
-  { id: 'auth_ts',      name: 'auth.ts',        fileStatus: 'modified',  x: 590, y: 42  },
-  { id: 'jwt_ts',       name: 'jwt.ts',         fileStatus: 'created',   x: 590, y: 120 },
-  { id: 'login_tsx',    name: 'LoginForm.tsx',  fileStatus: 'created',   x: 590, y: 210 },
-  { id: 'button_tsx',   name: 'Button.tsx',     fileStatus: 'modified',  x: 590, y: 288 },
-  { id: 'schema_sql',   name: 'schema.sql',     fileStatus: 'unchanged', x: 590, y: 362 },
-]
+function MermaidDiagram({ definition }: { definition: string }): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
 
-const EDGES: Edge[] = [
-  { from: 'auth',     to: 'auth_ts'    },
-  { from: 'auth',     to: 'jwt_ts'     },
-  { from: 'frontend', to: 'login_tsx'  },
-  { from: 'frontend', to: 'button_tsx' },
-  { from: 'db',       to: 'schema_sql' },
-]
+  useEffect(() => {
+    if (!ref.current) return
 
-// ─── Color helpers ────────────────────────────────────────────────────────────
+    if (!mermaidInitialised) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'base',
+        themeVariables: {
+          background: '#0a0a0d',
+          mainBkg: '#16161f',
+          nodeBorder: 'rgba(255,255,255,0.07)',
+          lineColor: 'rgba(255,255,255,0.2)',
+          textColor: '#ffffff',
+          fontSize: '12px',
+          fontFamily: 'Inter, sans-serif',
+        },
+        flowchart: {
+          curve: 'basis',
+          useMaxWidth: true,
+        },
+      })
+      mermaidInitialised = true
+    }
 
-const AGENT_BORDER: Record<AgentNode['status'], string> = {
-  live:      '#22c55e',
-  completed: '#94a3b8',
-}
+    let cancelled = false
+    const id = `mermaid-${Date.now()}`
 
-const FILE_BORDER: Record<FileNode['fileStatus'], string> = {
-  modified:  '#2563eb',
-  created:   '#22c55e',
-  unchanged: 'rgba(255,255,255,0.12)',
-}
+    mermaid.render(id, definition).then(({ svg }) => {
+      if (!cancelled && ref.current) {
+        ref.current.innerHTML = svg
+        // Make the SVG fill the container
+        const svgEl = ref.current.querySelector('svg')
+        if (svgEl) {
+          svgEl.style.width = '100%'
+          svgEl.style.height = '100%'
+          svgEl.removeAttribute('width')
+          svgEl.removeAttribute('height')
+        }
+      }
+    }).catch((err) => {
+      if (!cancelled && ref.current) {
+        ref.current.innerHTML = `<p style="color:#ef4444;padding:16px;font-size:12px">[Diagram error] ${String(err)}</p>`
+      }
+    })
 
-const FILE_LABEL_COLOR: Record<FileNode['fileStatus'], string> = {
-  modified:  '#2563eb',
-  created:   '#22c55e',
-  unchanged: 'rgba(255,255,255,0.25)',
-}
-
-const FILE_STATUS_TEXT: Record<FileNode['fileStatus'], string> = {
-  modified:  'Modified',
-  created:   'Created',
-  unchanged: 'Unchanged',
-}
-
-const LEGEND_ITEMS = [
-  { label: 'Agent (Live)',      color: '#22c55e',               shape: 'rect' },
-  { label: 'Agent (Completed)', color: '#94a3b8',               shape: 'rect' },
-  { label: 'File (Modified)',   color: '#2563eb',               shape: 'rect' },
-  { label: 'File (Created)',    color: '#22c55e',               shape: 'rect' },
-  { label: 'File (Unchanged)',  color: 'rgba(255,255,255,0.2)', shape: 'rect' },
-  { label: 'Dependency',        color: 'rgba(255,255,255,0.15)',shape: 'line' },
-]
-
-// ─── SVG diagram ──────────────────────────────────────────────────────────────
-
-function WorkflowDiagram(): React.JSX.Element {
-  const viewW = 880
-  const viewH = 460
-
-  // Build lookup maps for edge rendering
-  const agentMap = Object.fromEntries(AGENTS.map((a) => [a.id, a]))
-  const fileMap  = Object.fromEntries(FILES.map((f)  => [f.id,  f]))
+    return () => { cancelled = true }
+  }, [definition])
 
   return (
-    <svg
-      viewBox={`0 0 ${viewW} ${viewH}`}
-      width="100%"
-      height="100%"
-      style={{ display: 'block' }}
+    <div
+      ref={ref}
+      style={{ width: '100%', height: '100%', overflow: 'auto' }}
+    />
+  )
+}
+
+// ─── Empty state ──────────────────────────────────────────────────────────────
+
+function EmptyState(): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-3">
+      <GitBranch size={28} style={{ color: 'rgba(255,255,255,0.12)' }} />
+      <p className="text-sm" style={{ color: 'rgba(255,255,255,0.25)' }}>
+        No active agents. Start an agent to see the workflow.
+      </p>
+    </div>
+  )
+}
+
+// ─── Stats bar ────────────────────────────────────────────────────────────────
+
+function StatsBar({ agents }: { agents: Agent[] }): React.JSX.Element {
+  const activeCount = agents.filter((a) => a.status === 'running' || a.status === 'awaiting_input').length
+  const fileCount   = new Set(agents.flatMap((a) => a.filesTouched)).size
+
+  return (
+    <div
+      className="mt-3 rounded-lg px-4 py-2.5 flex items-center gap-6 shrink-0"
+      style={{ backgroundColor: '#13131a', border: '1px solid rgba(255,255,255,0.07)' }}
     >
-      {/* Grid dot pattern */}
-      <defs>
-        <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-          <circle cx="1" cy="1" r="0.8" fill="rgba(255,255,255,0.06)" />
-        </pattern>
-        <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-          <path d="M0,0 L0,6 L6,3 z" fill="rgba(255,255,255,0.15)" />
-        </marker>
-      </defs>
-      <rect width={viewW} height={viewH} fill="url(#grid)" />
-
-      {/* Edges */}
-      {EDGES.map((edge) => {
-        const a = agentMap[edge.from]
-        const f = fileMap[edge.to]
-        if (!a || !f) return null
-        const x1 = a.x + AGENT_W
-        const y1 = a.y + AGENT_H / 2
-        const x2 = f.x
-        const y2 = f.y + FILE_H / 2
-        const cx = (x1 + x2) / 2
-        return (
-          <path
-            key={`${edge.from}-${edge.to}`}
-            d={`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`}
-            fill="none"
-            stroke="rgba(255,255,255,0.15)"
-            strokeWidth="1.5"
-            markerEnd="url(#arrowhead)"
-          />
-        )
-      })}
-
-      {/* Agent nodes */}
-      {AGENTS.map((agent) => {
-        const borderColor = AGENT_BORDER[agent.status]
-        const isLive = agent.status === 'live'
-        return (
-          <g key={agent.id}>
-            {/* Subtle glow for live agents */}
-            {isLive && (
-              <rect
-                x={agent.x - 2} y={agent.y - 2}
-                width={AGENT_W + 4} height={AGENT_H + 4}
-                rx={9} fill="none"
-                stroke={borderColor}
-                strokeWidth="1"
-                opacity="0.2"
-              />
-            )}
-            <rect
-              x={agent.x} y={agent.y}
-              width={AGENT_W} height={AGENT_H}
-              rx={7}
-              fill="#16161f"
-              stroke={borderColor}
-              strokeWidth="1.5"
-            />
-            {/* Status dot */}
-            <circle
-              cx={agent.x + 14} cy={agent.y + AGENT_H / 2}
-              r={4}
-              fill={borderColor}
-            />
-            {/* Agent name */}
-            <text
-              x={agent.x + 26} y={agent.y + AGENT_H / 2 - 6}
-              fill="white" fontSize="11" fontWeight="600"
-              fontFamily="Inter, sans-serif"
-            >
-              {agent.name}
-            </text>
-            {/* Model */}
-            <text
-              x={agent.x + 26} y={agent.y + AGENT_H / 2 + 9}
-              fill="rgba(255,255,255,0.35)" fontSize="9"
-              fontFamily="Inter, sans-serif"
-            >
-              {agent.model}
-            </text>
-            {/* Status badge */}
-            <rect
-              x={agent.x + AGENT_W - 62} y={agent.y + 10}
-              width={52} height={16}
-              rx={4}
-              fill={`${borderColor}20`}
-            />
-            <text
-              x={agent.x + AGENT_W - 36} y={agent.y + 22}
-              fill={borderColor} fontSize="8.5"
-              fontFamily="Inter, sans-serif"
-              textAnchor="middle"
-              fontWeight="500"
-            >
-              {agent.status === 'live' ? 'LIVE' : 'DONE'}
-            </text>
-          </g>
-        )
-      })}
-
-      {/* File nodes */}
-      {FILES.map((file) => {
-        const borderColor = FILE_BORDER[file.fileStatus]
-        const labelColor  = FILE_LABEL_COLOR[file.fileStatus]
-        return (
-          <g key={file.id}>
-            <rect
-              x={file.x} y={file.y}
-              width={FILE_W} height={FILE_H}
-              rx={6}
-              fill="#13131a"
-              stroke={borderColor}
-              strokeWidth="1.2"
-            />
-            {/* Filename */}
-            <text
-              x={file.x + 12} y={file.y + FILE_H / 2 - 4}
-              fill="rgba(255,255,255,0.75)" fontSize="10"
-              fontFamily="JetBrains Mono, monospace"
-              fontWeight="500"
-            >
-              {file.name}
-            </text>
-            {/* File status */}
-            <text
-              x={file.x + 12} y={file.y + FILE_H / 2 + 9}
-              fill={labelColor} fontSize="8.5"
-              fontFamily="Inter, sans-serif"
-            >
-              {FILE_STATUS_TEXT[file.fileStatus]}
-            </text>
-          </g>
-        )
-      })}
-    </svg>
+      <div className="flex items-center gap-1.5">
+        <Clock size={11} style={{ color: 'rgba(255,255,255,0.2)' }} />
+        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>Live</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <GitBranch size={11} style={{ color: 'rgba(255,255,255,0.2)' }} />
+        <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
+          {activeCount} agent{activeCount !== 1 ? 's' : ''} active
+          &nbsp;|&nbsp;
+          {fileCount} file{fileCount !== 1 ? 's' : ''} touched
+          &nbsp;|&nbsp;
+          {agents.length} total agent{agents.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+    </div>
   )
 }
 
 // ─── Legend ───────────────────────────────────────────────────────────────────
+
+const LEGEND_ITEMS: { label: string; color: string }[] = [
+  { label: 'Running',        color: STATUS_COLOR.running        },
+  { label: 'Idle',           color: STATUS_COLOR.idle           },
+  { label: 'Awaiting input', color: STATUS_COLOR.awaiting_input },
+  { label: 'Error',          color: STATUS_COLOR.error          },
+  { label: 'Completed',      color: STATUS_COLOR.completed      },
+  { label: 'File touched',   color: '#2563eb'                   },
+]
 
 function Legend(): React.JSX.Element {
   return (
@@ -260,17 +190,10 @@ function Legend(): React.JSX.Element {
       </p>
       {LEGEND_ITEMS.map((item) => (
         <div key={item.label} className="flex items-center gap-2">
-          {item.shape === 'rect' ? (
-            <span
-              className="rounded shrink-0"
-              style={{ width: 10, height: 10, border: `1.5px solid ${item.color}`, backgroundColor: 'transparent', display: 'inline-block' }}
-            />
-          ) : (
-            <span
-              className="shrink-0"
-              style={{ width: 12, height: 2, backgroundColor: item.color, display: 'inline-block', borderRadius: 1 }}
-            />
-          )}
+          <span
+            className="rounded shrink-0"
+            style={{ width: 10, height: 10, border: `1.5px solid ${item.color}`, backgroundColor: 'transparent', display: 'inline-block' }}
+          />
           <span className="text-xs" style={{ color: 'rgba(255,255,255,0.45)' }}>{item.label}</span>
         </div>
       ))}
@@ -281,10 +204,16 @@ function Legend(): React.JSX.Element {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function Workflows(): React.JSX.Element {
+  const agents = useAgentStore((s) => s.agents)
+  const hasAgents = agents.length > 0
+
+  // Build diagram definition string; re-computed whenever agents array changes.
+  const definition = hasAgents ? buildDefinition(agents) : ''
+
   return (
     <div className="p-6 flex flex-col" style={{ height: '100%' }}>
 
-      {/* Header + toolbar */}
+      {/* Header */}
       <div className="flex items-center justify-between mb-4 shrink-0">
         <div>
           <h1 className="text-base font-semibold text-white">Workflows</h1>
@@ -292,70 +221,24 @@ export default function Workflows(): React.JSX.Element {
             Live read-only diagram of agent activity
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md"
-            style={{
-              backgroundColor: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.07)',
-              color: 'rgba(255,255,255,0.6)',
-              cursor: 'pointer',
-            }}
-          >
-            <Pause size={11} />
-            Pause Live Updates
-          </button>
-          <button
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md"
-            style={{
-              backgroundColor: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.07)',
-              color: 'rgba(255,255,255,0.6)',
-              cursor: 'pointer',
-            }}
-          >
-            <Download size={11} />
-            Export Diagram
-          </button>
-        </div>
       </div>
 
       {/* Canvas + legend */}
       <div className="flex gap-3 flex-1 min-h-0">
-        {/* Diagram canvas */}
         <div
           className="flex-1 rounded-lg overflow-hidden"
           style={{ backgroundColor: '#0a0a0d', border: '1px solid rgba(255,255,255,0.07)' }}
         >
-          <WorkflowDiagram />
+          {hasAgents
+            ? <MermaidDiagram definition={definition} />
+            : <EmptyState />}
         </div>
-
-        {/* Right panel: legend */}
         <div className="shrink-0">
           <Legend />
         </div>
       </div>
 
-      {/* Stats bar */}
-      <div
-        className="mt-3 rounded-lg px-4 py-2.5 flex items-center gap-6 shrink-0"
-        style={{ backgroundColor: '#13131a', border: '1px solid rgba(255,255,255,0.07)' }}
-      >
-        <div className="flex items-center gap-1.5">
-          <Clock size={11} style={{ color: 'rgba(255,255,255,0.2)' }} />
-          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>Last snapshot: 2 min ago</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <GitBranch size={11} style={{ color: 'rgba(255,255,255,0.2)' }} />
-          <span className="text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
-            3 agents active &nbsp;|&nbsp; 7 files modified &nbsp;|&nbsp; 2 agent connections
-          </span>
-        </div>
-        <span className="ml-auto text-xs" style={{ color: 'rgba(255,255,255,0.2)' }}>
-          Session started 14 min ago &nbsp;·&nbsp; System Status: Operational
-        </span>
-      </div>
-
+      <StatsBar agents={agents} />
     </div>
   )
 }

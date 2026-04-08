@@ -91,26 +91,10 @@ function pushSessionId(agentId: string, sessionId: string): void {
 }
 
 /**
- * Patterns that indicate Claude Code is pausing for user approval.
- * Tested against the raw stdout line (case-insensitive).
+ * Patterns that indicate an agent is pausing for user approval.
+ * Only relevant for non-JSON-mode agents (Gemini, Codex).
  */
 const PERMISSION_RE = /do you want to|allow this|shall i|\(y\/n\)|yes\/no/i
-
-/**
- * Extract a Claude Code session ID from a stdout line.
- * Matches "session_id: <uuid>", "Session: <uuid>", JSON "session_id":"<uuid>",
- * or a line that is purely a UUID.
- */
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
-const SESSION_CONTEXT_RE = /session[_\-]?id|session/i
-
-function extractSessionId(line: string): string | null {
-  const uuid = line.match(UUID_RE)?.[0]
-  if (!uuid) return null
-  // Accept if there's a "session" keyword on the same line, or the line is purely the UUID.
-  if (SESSION_CONTEXT_RE.test(line) || line.trim() === uuid) return uuid
-  return null
-}
 
 /**
  * Resolve the CLI binary and arguments for a given model name.
@@ -120,24 +104,30 @@ function resolveCommand(
   model: string,
   task: string,
   sessionId?: string
-): { cmd: string; args: string[]; stdinMode: 'pipe' | 'ignore' } {
+): { cmd: string; args: string[]; stdinMode: 'pipe' | 'ignore'; jsonMode: boolean } {
   const m = model.toLowerCase()
   if (m.includes('claude')) {
-    const args = ['-p', task, '--dangerously-skip-permissions']
+    const args = ['-p', task, '--dangerously-skip-permissions', '--output-format', 'json']
     if (sessionId) args.push('--resume', sessionId)
-    return { cmd: resolvedClaudePath, args, stdinMode: 'pipe' }
+    return { cmd: resolvedClaudePath, args, stdinMode: 'pipe', jsonMode: true }
   }
   if (m.includes('gemini')) {
-    return { cmd: 'gemini', args: ['-m', model, '--prompt', task, '--yolo'], stdinMode: 'ignore' }
+    return {
+      cmd: 'gemini',
+      args: ['-m', model, '--prompt', task, '--yolo'],
+      stdinMode: 'ignore',
+      jsonMode: false,
+    }
   }
   if (m.includes('codex') || m === 'o3' || m === 'o4-mini') {
-    return { cmd: 'codex', args: [task], stdinMode: 'pipe' }
+    return { cmd: 'codex', args: [task], stdinMode: 'pipe', jsonMode: false }
   }
   // Fallback to claude
   return {
     cmd: resolvedClaudePath,
-    args: ['-p', task, '--dangerously-skip-permissions'],
+    args: ['-p', task, '--dangerously-skip-permissions', '--output-format', 'json'],
     stdinMode: 'pipe',
+    jsonMode: true,
   }
 }
 
@@ -170,11 +160,10 @@ function flushLines(
 /** Spawn a new agent process. Returns success + pid on success. */
 export function spawnAgent(config: SpawnConfig, sessionId?: string): SpawnResult {
   const { id, model, workingDirectory, task } = config
-  const { cmd, args, stdinMode } = resolveCommand(model, task, sessionId)
+  const { cmd, args, stdinMode, jsonMode } = resolveCommand(model, task, sessionId)
 
   const augmentedEnv = { ...process.env, PATH: AUGMENTED_PATH }
 
-  // DEBUG: print the full resolved command so we can verify --resume <sessionId> appears
   console.log(`[DEBUG spawn] cmd: ${cmd}`)
   console.log(`[DEBUG spawn] args: ${JSON.stringify(args)}`)
   console.log(`[DEBUG spawn] sessionId passed in: ${sessionId ?? '(none)'}`)
@@ -183,8 +172,6 @@ export function spawnAgent(config: SpawnConfig, sessionId?: string): SpawnResult
   let child: ChildProcess
   try {
     // shell: false — args are passed directly to execvp, no shell splitting.
-    // With shell:true, a task like "create a file called test.txt" becomes
-    // four separate shell tokens; the full string must arrive as one argument.
     child = spawn(cmd, args, {
       cwd: workingDirectory,
       stdio: [stdinMode, 'pipe', 'pipe'],
@@ -202,62 +189,83 @@ export function spawnAgent(config: SpawnConfig, sessionId?: string): SpawnResult
   processes.set(id, child)
   agentConfigs.set(id, config)
 
-  // ── stdout ───────────────────────────────────────────────────────────────
-  let stdoutBuf = ''
-
-  const processLine = (line: string): void => {
-    console.log('[RAW stdout]', JSON.stringify(line))
-    if (PERMISSION_RE.test(line)) pushPermission(id, line)
-    if (!agentSessionIds.has(id)) {
-      const sid = extractSessionId(line)
-      if (sid) {
-        console.log('[SESSION CAPTURED]', sid)
-        agentSessionIds.set(id, sid)
-        pushSessionId(id, sid)
-      }
-    }
-  }
-
-  child.stdout?.on('data', (chunk: Buffer) => {
-    stdoutBuf = flushLines(id, stdoutBuf, chunk, '', processLine)
-  })
-
-  // ── stderr ───────────────────────────────────────────────────────────────
+  // ── stderr (both paths) ───────────────────────────────────────────────────
   let stderrBuf = ''
   child.stderr?.on('data', (chunk: Buffer) => {
     stderrBuf = flushLines(id, stderrBuf, chunk, '[ERR] ')
   })
 
-  // ── spawn error (e.g. ENOENT — binary not found) ─────────────────────────
+  // ── spawn error ───────────────────────────────────────────────────────────
   child.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'ENOENT') {
-      pushOutput(
-        id,
-        `[ERR] '${cmd}' not found. Make sure it is installed and available in PATH.`
-      )
+      pushOutput(id, `[ERR] '${cmd}' not found. Make sure it is installed and available in PATH.`)
     } else {
       pushOutput(id, `[ERR] Process error: ${err.message}`)
     }
     console.error(`[processManager] process error for agent=${id}:`, err)
     processes.delete(id)
-    // Keep agentConfigs so follow-up tasks can still be spawned.
     pushOutput(id, '[ORBITAL] Agent exited with error.')
   })
 
-  // ── process exit ──────────────────────────────────────────────────────────
-  child.on('close', (code: number | null) => {
-    // Flush any unterminated final line — it won't have been processed by flushLines.
-    if (stdoutBuf.length > 0) {
-      pushOutput(id, stdoutBuf)
-      processLine(stdoutBuf)
-    }
-    if (stderrBuf.length > 0) pushOutput(id, `[ERR] ${stderrBuf}`)
+  if (jsonMode) {
+    // ── JSON mode (Claude) ────────────────────────────────────────────────
+    // Buffer all stdout, parse once on close to extract result text + session_id.
+    let rawJson = ''
+    child.stdout?.on('data', (chunk: Buffer) => {
+      rawJson += chunk.toString()
+    })
 
-    console.log(`[processManager] agent=${id} exited with code=${code}`)
-    processes.delete(id)
-    // Keep agentConfigs so follow-up tasks can still be spawned.
-    pushOutput(id, `[ORBITAL] Agent exited (code ${code ?? 'unknown'}).`)
-  })
+    child.on('close', (code: number | null) => {
+      if (stderrBuf.length > 0) pushOutput(id, `[ERR] ${stderrBuf}`)
+
+      if (rawJson.length > 0) {
+        try {
+          const parsed = JSON.parse(rawJson) as {
+            result?: string
+            session_id?: string
+            is_error?: boolean
+          }
+
+          // Capture session ID for subsequent --resume invocations.
+          if (parsed.session_id) {
+            console.log('[SESSION CAPTURED]', parsed.session_id)
+            agentSessionIds.set(id, parsed.session_id)
+            pushSessionId(id, parsed.session_id)
+          }
+
+          // Push the response text line-by-line so the terminal renders it.
+          const text = parsed.result ?? (parsed.is_error ? '[ERR] Claude reported an error.' : '')
+          for (const line of text.split('\n')) {
+            pushOutput(id, line)
+          }
+        } catch {
+          // Malformed JSON — push raw so nothing is silently lost.
+          pushOutput(id, rawJson)
+        }
+      }
+
+      console.log(`[processManager] agent=${id} exited with code=${code}`)
+      processes.delete(id)
+      pushOutput(id, `[ORBITAL] Agent exited (code ${code ?? 'unknown'}).`)
+    })
+  } else {
+    // ── Streaming mode (Gemini, Codex) ────────────────────────────────────
+    let stdoutBuf = ''
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBuf = flushLines(id, stdoutBuf, chunk, '', (line) => {
+        if (PERMISSION_RE.test(line)) pushPermission(id, line)
+      })
+    })
+
+    child.on('close', (code: number | null) => {
+      if (stdoutBuf.length > 0) pushOutput(id, stdoutBuf)
+      if (stderrBuf.length > 0) pushOutput(id, `[ERR] ${stderrBuf}`)
+
+      console.log(`[processManager] agent=${id} exited with code=${code}`)
+      processes.delete(id)
+      pushOutput(id, `[ORBITAL] Agent exited (code ${code ?? 'unknown'}).`)
+    })
+  }
 
   return { success: true, pid: child.pid }
 }
