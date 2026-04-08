@@ -72,15 +72,30 @@ function pushOutput(agentId: string, line: string): void {
  * Resolve the CLI binary and arguments for a given model name.
  * Claude uses the dynamically-resolved absolute path.
  */
-function resolveCommand(model: string, task: string): { cmd: string; args: string[] } {
+function resolveCommand(
+  model: string,
+  task: string
+): { cmd: string; args: string[]; stdinMode: 'pipe' | 'ignore' } {
   const m = model.toLowerCase()
   if (m.includes('claude')) {
-    return { cmd: resolvedClaudePath, args: ['-p', task, '--dangerously-skip-permissions'] }
+    return {
+      cmd: resolvedClaudePath,
+      args: ['-p', task, '--dangerously-skip-permissions'],
+      stdinMode: 'pipe',
+    }
   }
-  if (m.includes('gemini')) return { cmd: 'gemini', args: [task] }
-  if (m.includes('codex') || m === 'o3' || m === 'o4-mini') return { cmd: 'codex', args: [task] }
+  if (m.includes('gemini')) {
+    return { cmd: 'gemini', args: ['--prompt', task, '--yolo'], stdinMode: 'ignore' }
+  }
+  if (m.includes('codex') || m === 'o3' || m === 'o4-mini') {
+    return { cmd: 'codex', args: [task], stdinMode: 'pipe' }
+  }
   // Fallback to claude
-  return { cmd: resolvedClaudePath, args: ['-p', task, '--dangerously-skip-permissions'] }
+  return {
+    cmd: resolvedClaudePath,
+    args: ['-p', task, '--dangerously-skip-permissions'],
+    stdinMode: 'pipe',
+  }
 }
 
 /**
@@ -107,7 +122,7 @@ function flushLines(
 /** Spawn a new agent process. Returns success + pid on success. */
 export function spawnAgent(config: SpawnConfig): SpawnResult {
   const { id, model, workingDirectory, task } = config
-  const { cmd, args } = resolveCommand(model, task)
+  const { cmd, args, stdinMode } = resolveCommand(model, task)
 
   const augmentedEnv = { ...process.env, PATH: AUGMENTED_PATH }
 
@@ -121,7 +136,7 @@ export function spawnAgent(config: SpawnConfig): SpawnResult {
     // four separate shell tokens; the full string must arrive as one argument.
     child = spawn(cmd, args, {
       cwd: workingDirectory,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: [stdinMode, 'pipe', 'pipe'],
       shell: false,
       env: augmentedEnv,
     })
